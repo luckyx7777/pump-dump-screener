@@ -1,0 +1,1 @@
+The full README content from previous read
