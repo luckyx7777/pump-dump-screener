@@ -4,6 +4,7 @@ Main entrypoint для Railway.
 """
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 import uvicorn
@@ -65,11 +66,12 @@ async def on_new_feature(symbol: str, features: FeatureVector):
     # 2. Отправляем алерт в Telegram
     await send_pump_dump_alert(signal, features)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global binance_collector, bybit_collector
 
-    logger.info("🚀 Starting Pump & Dump Screener v0.2")
+    logger.info("🚀 Starting Pump & Dump Screener v0.4")
 
     # Инициализация
     for symbol in settings.symbols:
@@ -135,4 +137,5 @@ async def get_features(symbol: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=False)
