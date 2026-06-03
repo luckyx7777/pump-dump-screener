@@ -4,17 +4,17 @@ Telegram Bot для скринера пампов/дампов.
 """
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from datetime import datetime
-from app.config import settings
-from app.models import Signal
 import structlog
 
 logger = structlog.get_logger()
 
-bot = Bot(token=settings.telegram_bot_token, parse_mode=ParseMode.HTML)
+bot = Bot(
+    token=settings.telegram_bot_token,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+
 dp = Dispatcher()
 
 
@@ -41,11 +41,9 @@ async def cmd_screen(message: Message):
         return
 
     symbol = args[1].upper()
-    # В будущем здесь будет запрос к Redis / БД за актуальными фичами
     await message.answer(
         f"📊 <b>{symbol}</b>\n\n"
-        "Актуальные данные пока в разработке.\n"
-        "Скоро здесь будет live-скоринг из Redis."
+        "Live-данные пока в разработке."
     )
 
 
@@ -54,7 +52,6 @@ async def cmd_status(message: Message):
     text = "📈 <b>Статус мониторинга</b>\n\n"
     for sym in settings.symbols:
         text += f"• <b>{sym}</b> — в работе\n"
-    text += f"\nВсего пар: <b>{len(settings.symbols)}</b>"
     await message.answer(text)
 
 
@@ -67,8 +64,6 @@ async def cmd_symbols(message: Message):
 # ====================== ОТПРАВКА АЛЕРТОВ ======================
 
 def _format_signal_alert(signal: Signal, features: FeatureVector | None = None) -> str:
-    """Красивое форматирование алерта с реальными значениями метрик из документа."""
-
     emoji = "🟢" if signal.direction == "LONG" else "🔴" if signal.direction == "SHORT" else "⚪"
     direction_text = {
         "LONG": "PRE-PUMP (лонг)",
@@ -83,56 +78,45 @@ def _format_signal_alert(signal: Signal, features: FeatureVector | None = None) 
         f"Время: <code>{signal.timestamp.strftime('%H:%M:%S')}</code>\n\n"
     )
 
-    # === Реальные значения ключевых метрик ===
     if features:
-        text += "<b>Микроструктура (текущие значения):</b>\n"
+        text += "<b>Микроструктура:</b>\n"
         text += f"• WOBI: <code>{features.wobi:+.3f}</code>\n"
+        text += f"• MLOFI: <code>{features.mlofi:+.2f}</code>\n"
         text += f"• CVD: <code>{features.cvd:+.2f}</code>\n"
         text += f"• Taker Aggression: <code>{features.taker_aggression:+.3f}</code>\n"
-        text += f"• Leverage Velocity (θ_LV): <code>{features.leverage_velocity:.2f}</code>\n"
-        if features.spread:
-            text += f"• Spread: <code>{features.spread:.4f}</code>\n"
+        text += f"• Leverage Velocity: <code>{features.leverage_velocity:.2f}</code>\n"
+        if features.iceberg_estimate > 10:
+            text += f"• Iceberg: <code>{features.iceberg_estimate:.1f}</code>\n"
+        if features.spoof_score > 5:
+            text += f"• Spoof Score: <code>{features.spoof_score:.1f}</code>\n"
         text += "\n"
 
     if signal.triggered_metrics:
-        text += "<b>Активированные триггеры / гейты:</b>\n"
-        for metric in signal.triggered_metrics:
-            text += f"• <code>{metric}</code>\n"
-        text += "\n"
+        text += "<b>Триггеры:</b>\n" + "\n".join(f"• <code>{m}</code>" for m in signal.triggered_metrics) + "\n\n"
 
     if signal.explanation:
         text += f"<b>Объяснение:</b>\n{signal.explanation}\n\n"
 
-    text += (
-        "<i>Методология: Weighted OBI + Multi-Level OFI + CVD + Leverage Velocity + гейты</i>"
-    )
-
+    text += "<i>Методология: WOBI + MLOFI + CVD + Leverage Velocity + гейты</i>"
     return text
 
 
 async def send_pump_dump_alert(signal: Signal, features: FeatureVector | None = None):
-    """
-    Реальная отправка алерта в Telegram с метриками.
-    """
     if not settings.telegram_alert_chat_id:
-        logger.warning("TELEGRAM_ALERT_CHAT_ID не задан — алерт не отправлен", symbol=signal.symbol)
+        logger.warning("TELEGRAM_ALERT_CHAT_ID не задан", symbol=signal.symbol)
         return
 
     try:
-        alert_text = _format_signal_alert(signal, features)
         await bot.send_message(
             chat_id=settings.telegram_alert_chat_id,
-            text=alert_text,
+            text=_format_signal_alert(signal, features),
             disable_web_page_preview=True
         )
-        logger.info("Alert sent to Telegram", symbol=signal.symbol, direction=signal.direction)
+        logger.info("Alert sent", symbol=signal.symbol, direction=signal.direction)
     except Exception as e:
-        logger.error("Failed to send Telegram alert", error=str(e), symbol=signal.symbol)
+        logger.error("Failed to send alert", error=str(e), symbol=signal.symbol)
 
-
-# ====================== ЗАПУСК БОТА ======================
 
 async def start_bot():
-    """Запуск polling бота (вызывается из main.py)"""
-    logger.info("Starting Telegram bot polling...")
+    logger.info("Starting Telegram bot...")
     await dp.start_polling(bot)
