@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     database_url: str = Field("postgresql+asyncpg://user:pass@localhost/db", env="DATABASE_URL")
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
 
-    # Symbols to monitor (top liquid)
+    # Symbols to monitor
     symbols: List[str] = Field(
         default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
         env="SYMBOLS"
@@ -30,10 +30,18 @@ class Settings(BaseSettings):
     @classmethod
     def parse_symbols(cls, v):
         if isinstance(v, str):
-            if v.strip().startswith("["):
+            v = v.strip()
+            if not v:
+                return cls.model_fields["symbols"].default
+            if v.startswith("["):
                 import json
-                return json.loads(v)
+                try:
+                    return [str(s).upper() for s in json.loads(v)]
+                except:
+                    pass
             return [s.strip().upper() for s in v.split(",") if s.strip()]
+        if isinstance(v, list):
+            return [str(s).upper() for s in v]
         return v
 
     # Feature parameters
