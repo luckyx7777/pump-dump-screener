@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from typing import List
 
 
@@ -26,6 +26,16 @@ class Settings(BaseSettings):
         env="SYMBOLS"
     )
 
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def parse_symbols(cls, v):
+        if isinstance(v, str):
+            if v.strip().startswith("["):
+                import json
+                return json.loads(v)
+            return [s.strip().upper() for s in v.split(",") if s.strip()]
+        return v
+
     # Feature parameters
     wobi_levels: int = 10
     wobi_lambda: float = 0.3
@@ -33,7 +43,7 @@ class Settings(BaseSettings):
     spoof_threshold: float = 10.0
 
     # Scoring
-    zscore_window: int = 300  # seconds
+    zscore_window: int = 300
     pump_threshold: float = 0.65
     dump_threshold: float = -0.65
 
