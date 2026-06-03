@@ -1,6 +1,6 @@
 import os
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from typing import List
 
 
@@ -21,21 +21,19 @@ class Settings(BaseSettings):
     database_url: str = Field("postgresql+asyncpg://user:pass@localhost/db", env="DATABASE_URL")
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
 
-    # Symbols — парсим вручную, чтобы избежать проблем с Railway
+    # Symbols — не даём pydantic-settings парсить это поле автоматически
     symbols: List[str] = Field(default_factory=list)
 
-    def __init__(self, **data):
-        super().__init__(**data)
+    @model_validator(mode='after')
+    def parse_symbols(self):
         if not self.symbols:
-            env_symbols = os.getenv(
-                "SYMBOLS", 
-                "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
-            )
+            env_symbols = os.getenv("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT")
             self.symbols = [
                 s.strip().upper() 
                 for s in env_symbols.split(",") 
                 if s.strip()
             ]
+        return self
 
     # Feature parameters
     wobi_levels: int = 10
