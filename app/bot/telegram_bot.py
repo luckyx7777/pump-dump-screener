@@ -1,0 +1,1 @@
+full code of telegram_bot.py with real alert formatting
