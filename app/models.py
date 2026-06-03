@@ -33,7 +33,7 @@ class FeatureVector(BaseModel):
     spread: float
     imbalance_5: float  # simple top-5 imbalance for quick view
 
-    # MLOFI + Market Regime (from the paper)
+    # MLOFI + Market Regime (из документа)
     mlofi: float = 0.0
     regime: int = 0
     regime_name: str = "LOW_VOL"
