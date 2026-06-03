@@ -1,5 +1,6 @@
+import os
 from pydantic_settings import BaseSettings
-from pydantic import Field, field_validator
+from pydantic import Field
 from typing import List
 
 
@@ -20,29 +21,21 @@ class Settings(BaseSettings):
     database_url: str = Field("postgresql+asyncpg://user:pass@localhost/db", env="DATABASE_URL")
     redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
 
-    # Symbols to monitor
-    symbols: List[str] = Field(
-        default=["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"],
-        env="SYMBOLS"
-    )
+    # Symbols — парсим вручную, чтобы избежать проблем с Railway
+    symbols: List[str] = Field(default_factory=list)
 
-    @field_validator("symbols", mode="before")
-    @classmethod
-    def parse_symbols(cls, v):
-        if isinstance(v, str):
-            v = v.strip()
-            if not v:
-                return cls.model_fields["symbols"].default
-            if v.startswith("["):
-                import json
-                try:
-                    return [str(s).upper() for s in json.loads(v)]
-                except:
-                    pass
-            return [s.strip().upper() for s in v.split(",") if s.strip()]
-        if isinstance(v, list):
-            return [str(s).upper() for s in v]
-        return v
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.symbols:
+            env_symbols = os.getenv(
+                "SYMBOLS", 
+                "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT"
+            )
+            self.symbols = [
+                s.strip().upper() 
+                for s in env_symbols.split(",") 
+                if s.strip()
+            ]
 
     # Feature parameters
     wobi_levels: int = 10
