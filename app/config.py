@@ -1,4 +1,4 @@
-from pydantic import Field, field_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -22,7 +22,10 @@ class Settings(BaseSettings):
         validation_alias="REDIS_URL"
     )
 
-    symbols: List[str] = Field(default_factory=list, validation_alias="SYMBOLS")
+    # ВАЖНО: используем str + model_validator, чтобы обойти json-логику pydantic-settings
+    _symbols_raw: str = Field("", validation_alias="SYMBOLS", exclude=True)
+
+    symbols: List[str] = Field(default_factory=list)
 
     wobi_levels: int = Field(10, validation_alias="WOBI_LEVELS")
     wobi_lambda: float = Field(0.3, validation_alias="WOBI_LAMBDA")
@@ -41,16 +44,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("symbols", mode="before")
-    @classmethod
-    def parse_symbols(cls, v):
-        if isinstance(v, str):
-            # Убираем возможные кавычки и пробелы
-            v = v.strip().strip('"\'')
-            return [s.strip().upper() for s in v.split(",") if s.strip()]
-        if isinstance(v, (list, tuple)):
-            return [str(s).strip().upper() for s in v if str(s).strip()]
-        return v or []
+    @model_validator(mode="after")
+    def parse_symbols(self):
+        if not self.symbols and self._symbols_raw:
+            raw = self._symbols_raw.strip().strip("\"'")
+            self.symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
+
+        if not self.symbols:
+            # fallback
+            self.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
+
+        return self
 
 
 settings = Settings()
