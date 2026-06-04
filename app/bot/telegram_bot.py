@@ -7,6 +7,8 @@ from app.config import settings
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import Message
 import structlog
 
 logger = structlog.get_logger()
