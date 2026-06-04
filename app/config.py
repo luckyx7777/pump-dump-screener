@@ -22,10 +22,10 @@ class Settings(BaseSettings):
         validation_alias="REDIS_URL"
     )
 
-    # Сырое значение SYMBOLS как строка (не вызывает попытку json.loads)
+    # Сырое значение из SYMBOLS (как строка — не вызывает json.loads)
     symbols_raw: str = Field("", validation_alias="SYMBOLS", exclude=True)
 
-    # Итоговый список (заполняется после создания объекта)
+    # Итоговый список символов
     symbols: List[str] = Field(default_factory=list)
 
     wobi_levels: int = Field(10, validation_alias="WOBI_LEVELS")
@@ -52,7 +52,6 @@ class Settings(BaseSettings):
             if raw:
                 self.symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
 
-        # Фоллбэк, если ничего не пришло
         if not self.symbols:
             self.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
         return self
