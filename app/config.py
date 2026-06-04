@@ -1,3 +1,4 @@
+import os
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
@@ -13,29 +14,22 @@ class Settings(BaseSettings):
     bybit_api_key: str | None = Field(None, validation_alias="BYBIT_API_KEY")
     bybit_api_secret: str | None = Field(None, validation_alias="BYBIT_API_SECRET")
 
-    database_url: str = Field(
-        "postgresql+asyncpg://user:pass@localhost/db",
-        validation_alias="DATABASE_URL"
-    )
-    redis_url: str = Field(
-        "redis://localhost:6379/0",
-        validation_alias="REDIS_URL"
-    )
+    database_url: str = Field(..., validation_alias="DATABASE_URL")
+    redis_url: str = Field(..., validation_alias="REDIS_URL")
 
-    # Сырое значение из SYMBOLS (как строка — не вызывает json.loads)
+    # symbols_raw ловит SYMBOLS как обычную строку (без попытки json.loads)
     symbols_raw: str = Field("", validation_alias="SYMBOLS", exclude=True)
 
-    # Итоговый список символов
     symbols: List[str] = Field(default_factory=list)
 
     wobi_levels: int = Field(10, validation_alias="WOBI_LEVELS")
-    wobi_lambda: float = Field(0.3, validation_alias="WOBI_LAMBDA")
-    cvd_window_seconds: int = Field(60, validation_alias="CVD_WINDOW_SECONDS")
+    wobi_lambda: float = Field(0.35, validation_alias="WOBI_LAMBDA")
+    cvd_window_seconds: int = Field(90, validation_alias="CVD_WINDOW_SECONDS")
     spoof_threshold: float = Field(10.0, validation_alias="SPOOF_THRESHOLD")
 
     zscore_window: int = Field(300, validation_alias="ZSCORE_WINDOW")
-    pump_threshold: float = Field(0.65, validation_alias="PUMP_THRESHOLD")
-    dump_threshold: float = Field(-0.65, validation_alias="DUMP_THRESHOLD")
+    pump_threshold: float = Field(0.68, validation_alias="PUMP_THRESHOLD")
+    dump_threshold: float = Field(-0.68, validation_alias="DUMP_THRESHOLD")
 
     log_level: str = Field("INFO", validation_alias="LOG_LEVEL")
 
@@ -55,3 +49,7 @@ class Settings(BaseSettings):
         if not self.symbols:
             self.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
         return self
+
+
+# === ВАЖНО: эта строка обязательна ===
+settings = Settings()
