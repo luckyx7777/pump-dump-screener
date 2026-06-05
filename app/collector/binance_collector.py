@@ -1,7 +1,7 @@
 """
 Полноценный асинхронный WebSocket Collector для Binance Spot + USDT-M Futures.
 Поддерживает:
-- Orderbook (depth@100ms) с правильной реконструкцией
+- Orderbook (depth@100ms) с правильной реконструкцией и sequence validation
 - aggTrade (агрессивные сделки)
 - forceOrder (ликвидации)
 - markPrice (funding rate)
@@ -43,7 +43,6 @@ class BinanceCollector:
         self.session = aiohttp.ClientSession()
 
         for symbol in self.symbols:
-            # Запускаем отдельные таски для разных стримов
             self.tasks.append(asyncio.create_task(self._run_depth_stream(symbol)))
             self.tasks.append(asyncio.create_task(self._run_aggtrade_stream(symbol)))
             self.tasks.append(asyncio.create_task(self._run_liquidation_stream(symbol)))
@@ -64,7 +63,7 @@ class BinanceCollector:
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def _run_depth_stream(self, symbol: str):
-        """Depth stream @100ms + initial snapshot"""
+        """Depth stream @100ms + initial snapshot + sequence gap recovery"""
         ob = self.orderbooks[symbol]
         engine = self.engines[symbol]
 
@@ -81,9 +80,16 @@ class BinanceCollector:
                     break
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
-                    if ob.update_binance(data):
-                        # Обновляем фичи
+                    success = ob.update_binance(data)
+                    if success:
                         await self._update_features(symbol, ob, engine)
+                    else:
+                        # GAP DETECTED - resync immediately (per methodology requirement)
+                        logger.warning("Binance L2 gap detected - resyncing snapshot", symbol=symbol)
+                        await self._fetch_binance_snapshot(symbol, ob)
+                        # Optionally re-apply the current message after resync
+                        if ob.update_binance(data):
+                            await self._update_features(symbol, ob, engine)
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.error("Binance depth WS error", symbol=symbol)
                     break
@@ -115,7 +121,6 @@ class BinanceCollector:
                     is_buy = not data.get("m", False)  # m = maker side (false = taker buy)
 
                     engine.update_cvd(price, qty, is_buy=is_buy)
-                    # Можно сразу триггерить пересчёт фич при необходимости
 
     async def _run_liquidation_stream(self, symbol: str):
         """forceOrder — крупные ликвидации"""
