@@ -1,6 +1,6 @@
 """
-Market Regime Detection с помощью Hidden Markov Model (HMM).
-Исправленная версия: стабильная transition matrix без ошибок 'rows must sum to 1'.
+Market Regime Detection с помощью HMM.
+Максимально стабильная версия (без ошибок transmat rows must sum to 1).
 """
 
 import numpy as np
@@ -16,26 +16,26 @@ class MarketRegimeDetector:
         self.n_states = n_states
         self.window = window
 
-        # Важно: init_params='' чтобы не перезаписывать нашу transition matrix
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
-            n_iter=150,
+            n_iter=100,
             random_state=42,
-            init_params="",          # не трогаем startprob / transmat / means
-            params="mcd"           # обновляем means, covars, но не transmat
+            init_params="",
+            params="mcd"
         )
 
-        # Фиксированная transition matrix (3 состояния)
         if n_states == 3:
-            self._startprob = np.array([0.5, 0.3, 0.2])
-            self._transmat = np.array([
+            # Жёстко задаём переходы
+            raw_transmat = np.array([
                 [0.70, 0.25, 0.05],
                 [0.15, 0.65, 0.20],
                 [0.10, 0.30, 0.60],
-            ])
-            # Нормализуем на всякий случай
-            self._transmat = self._transmat / self._transmat.sum(axis=1, keepdims=True)
+            ], dtype=float)
+            self._transmat = raw_transmat / raw_transmat.sum(axis=1, keepdims=True)
+
+            self._startprob = np.array([0.5, 0.3, 0.2], dtype=float)
+            self._startprob = self._startprob / self._startprob.sum()
 
             self.hmm.startprob_ = self._startprob.copy()
             self.hmm.transmat_ = self._transmat.copy()
@@ -43,14 +43,13 @@ class MarketRegimeDetector:
         self.is_fitted = False
         self.feature_buffer: deque[float] = deque(maxlen=window)
         self.current_regime: int = 0
-        self.regime_names = {
-            0: "LOW_VOL",
-            1: "TRENDING",
-            2: "HIGH_VOL"
-        }
+        self.regime_names = {0: "LOW_VOL", 1: "TRENDING", 2: "HIGH_VOL"}
 
     def update(self, feature_value: float) -> int:
-        self.feature_buffer.append(feature_value)
+        if not np.isfinite(feature_value):
+            return self.current_regime
+
+        self.feature_buffer.append(float(feature_value))
 
         if len(self.feature_buffer) < 50:
             return self.current_regime
@@ -62,9 +61,9 @@ class MarketRegimeDetector:
                 self.hmm.fit(X)
                 self.is_fitted = True
             else:
-                self.hmm.fit(X[-min(150, len(X)): ])
+                self.hmm.fit(X[-min(120, len(X)): ])
 
-            # После каждого fit() восстанавливаем нашу transition matrix
+            # Всегда восстанавливаем нашу матрицу после fit
             if self.n_states == 3:
                 self.hmm.startprob_ = self._startprob.copy()
                 self.hmm.transmat_ = self._transmat.copy()
