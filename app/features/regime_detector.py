@@ -1,30 +1,36 @@
 """
-Market Regime Detection — максимально стабильная версия.
-Добавлена защита от плохих данных, которые ломают hmmlearn.
+Market Regime Detection — стабильная онлайн-версия.
+
+Ключевые улучшения:
+- Не вызываем fit() на каждом обновлении (это ломает hmmlearn).
+- Refit только раз в N обновлений.
+- При ошибке просто держим предыдущий режим.
+- Защита от плохих данных.
 """
 
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
 from collections import deque
-import traceback
 import structlog
 
 logger = structlog.get_logger()
 
 
 class MarketRegimeDetector:
-    def __init__(self, n_states: int = 3, window: int = 300):
+    def __init__(self, n_states: int = 3, window: int = 300, refit_every: int = 30):
         self.n_states = n_states
         self.window = window
+        self.refit_every = refit_every
+        self.update_count = 0
 
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
-            n_iter=100,
+            n_iter=80,
             random_state=42,
             init_params="",
             params="mcd",
-            min_covar=1e-6          # защита от вырождения
+            min_covar=1e-5
         )
 
         if n_states == 3:
@@ -55,6 +61,7 @@ class MarketRegimeDetector:
             return self.current_regime
 
         self.feature_buffer.append(float(feature_value))
+        self.update_count += 1
 
         if len(self.feature_buffer) < 50:
             return self.current_regime
@@ -62,32 +69,31 @@ class MarketRegimeDetector:
         X = np.array(list(self.feature_buffer), dtype=float).reshape(-1, 1)
 
         # Защита от плохих данных
-        if np.any(~np.isfinite(X)) or np.std(X) < 1e-12:
+        if np.any(~np.isfinite(X)) or np.std(X) < 1e-10:
             return self.current_regime
 
         try:
-            if not self.is_fitted:
-                self.hmm.fit(X)
+            do_fit = (not self.is_fitted) or (self.update_count % self.refit_every == 0)
+
+            if do_fit:
+                self.hmm.fit(X[-min(150, len(X)): ])
                 self.is_fitted = True
-            else:
-                self.hmm.fit(X[-min(120, len(X)): ])
 
-            if self.n_states == 3:
-                self.hmm.startprob_ = self._startprob.copy()
-                self.hmm.transmat_ = self._transmat.copy()
+                if self.n_states == 3:
+                    self.hmm.startprob_ = self._startprob.copy()
+                    self.hmm.transmat_ = self._transmat.copy()
 
-            hidden_states = self.hmm.predict(X)
-            self.current_regime = int(hidden_states[-1])
+            if self.is_fitted:
+                hidden_states = self.hmm.predict(X)
+                self.current_regime = int(hidden_states[-1])
 
         except Exception as e:
             logger.warning(
-                "HMM update failed",
+                "HMM update failed (kept previous regime)",
                 error=repr(e),
-                buffer_len=len(self.feature_buffer),
-                x_min=float(np.min(X)),
-                x_max=float(np.max(X)),
-                x_std=float(np.std(X))
+                buffer_len=len(self.feature_buffer)
             )
+            # При ошибке просто оставляем предыдущий режим
 
         return self.current_regime
 
