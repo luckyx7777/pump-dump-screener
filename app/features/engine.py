@@ -22,7 +22,6 @@ class FeatureEngine:
         self.cvd_buffer: Deque[float] = deque(maxlen=2000)
         self.trade_volume_buffer: Deque[float] = deque(maxlen=2000)
         self.oi_buffer: Deque[float] = deque(maxlen=500)
-        self.spot_volume_buffer: Deque[float] = deque(maxlen=500)
 
         self.last_cvd: float = 0.0
         self.last_mid: float = 0.0
@@ -45,10 +44,9 @@ class FeatureEngine:
         delta = qty if is_buy else -qty
         self.last_cvd += delta
         self.cvd_buffer.append(self.last_cvd)
-        self.trade_volume_buffer.append(qty)
+        self.trade_volume_buffer.append(qty)   # <-- важно для Leverage Velocity
 
     def update_derivative_data(self, open_interest: float, funding_rate: float = 0.0):
-        """Обновляет OI и funding rate (вызывается из Bybit ticker handler)"""
         self.last_oi = open_interest
         self.last_funding_rate = funding_rate
         if open_interest > 0:
@@ -92,7 +90,6 @@ class FeatureEngine:
         return cvd_delta / total_vol
 
     def calculate_leverage_velocity(self, delta_oi: float, mid_price: float, spot_volume: float) -> float:
-        """ θ_LV = (ΔOI × P_mid) / Volume_spot """
         if spot_volume <= 0 or mid_price <= 0:
             return 0.0
         return (delta_oi * mid_price) / spot_volume
@@ -105,23 +102,23 @@ class FeatureEngine:
         current_oi: float = 0.0,
         spot_volume_1m: float = 0.0
     ) -> FeatureVector:
-        # === Автоматический расчёт spot_volume_1m из буфера сделок (если не передали) ===
-        if spot_volume_1m <= 0 and len(self.trade_volume_buffer) > 10:
-            spot_volume_1m = sum(list(self.trade_volume_buffer)[-60:])  # ~1 минута
+        # === Надёжный расчёт spot volume из буфера сделок ===
+        effective_volume = spot_volume_1m
+        if effective_volume <= 0 and len(self.trade_volume_buffer) >= 20:
+            # Берём последние 60-120 обновлений (~1-2 минуты)
+            window = min(120, len(self.trade_volume_buffer))
+            effective_volume = sum(list(self.trade_volume_buffer)[-window:])
 
         effective_oi = current_oi if current_oi > 0 else self.last_oi
 
         wobi = self.calculate_wobi(bids, asks)
         taker_agg = self.calculate_taker_aggression()
 
-        # Leverage Velocity теперь должен работать
-        theta_lv = self.calculate_leverage_velocity(
-            delta_oi = effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi),
-            mid_price = mid_price,
-            spot_volume = spot_volume_1m
-        )
+        # Leverage Velocity
+        delta_oi = effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi)
+        theta_lv = self.calculate_leverage_velocity(delta_oi, mid_price, effective_volume)
 
-        if self.oi_buffer and effective_oi > 0:
+        if effective_oi > 0:
             self.oi_buffer.append(effective_oi)
 
         spread = (min([a.price for a in asks]) - max([b.price for b in bids])) if bids and asks else 0.0
