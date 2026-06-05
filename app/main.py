@@ -1,6 +1,6 @@
 """
 Main entrypoint для Railway.
-Полноценная интеграция WebSocket collectors (Binance + Bybit) + Feature Engine + Scorer + Telegram Bot.
+Полноценная интеграция WebSocket collectors + Feature Engine + Scorer + Telegram Bot.
 """
 
 import asyncio
@@ -21,7 +21,7 @@ from app.db.signals import save_signal
 
 logger = structlog.get_logger()
 
-app = FastAPI(title="Pump & Dump Screener", version="0.4.0")
+app = FastAPI(title="Pump & Dump Screener", version="0.4.1")
 
 # Глобальное состояние
 orderbooks: dict[str, OrderBook] = {}
@@ -32,13 +32,13 @@ binance_collector: BinanceCollector | None = None
 bybit_collector: BybitCollector | None = None
 
 
-# Простой cooldown чтобы не спамить один и тот же сигнал
+# Per-symbol cooldown 15 минут (соответствует документу)
 _last_alert_time: dict[str, float] = {}
-ALERT_COOLDOWN_SECONDS = 180  # 3 минуты между алертами по одной паре
+ALERT_COOLDOWN_SECONDS = 900  # 15 минут между алертами по одной паре
 
 
 async def on_new_feature(symbol: str, features: FeatureVector):
-    """Callback: FeatureEngine → Scorer → Save to DB → Telegram Alert"""
+    """Callback: FeatureEngine → Scorer → Save to DB → Telegram Alert (c кулдауном 15 мин)"""
     signal: Signal = scorer.score(features)
 
     if signal.direction == "NEUTRAL":
@@ -48,6 +48,7 @@ async def on_new_feature(symbol: str, features: FeatureVector):
     last_time = _last_alert_time.get(symbol, 0)
 
     if now - last_time < ALERT_COOLDOWN_SECONDS:
+        logger.debug("Cooldown active", symbol=symbol, remaining=ALERT_COOLDOWN_SECONDS - (now - last_time))
         return
 
     _last_alert_time[symbol] = now
@@ -56,7 +57,8 @@ async def on_new_feature(symbol: str, features: FeatureVector):
         "🚨 Signal generated",
         symbol=symbol,
         direction=signal.direction,
-        score=signal.score
+        score=signal.score,
+        regime=features.regime_name
     )
 
     # 1. Сохраняем в PostgreSQL
@@ -69,7 +71,7 @@ async def on_new_feature(symbol: str, features: FeatureVector):
 async def lifespan(app: FastAPI):
     global binance_collector, bybit_collector
 
-    logger.info("🚀 Starting Pump & Dump Screener v0.2")
+    logger.info("🚀 Starting Pump & Dump Screener v0.4.1 - with sequence validation + 3-state HMM regime + 15min cooldown")
 
     # Инициализация
     for symbol in settings.symbols:
