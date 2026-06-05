@@ -122,4 +122,4 @@ async def send_pump_dump_alert(signal: Signal, features: FeatureVector | None = 
 
 async def start_bot():
     logger.info("Starting Telegram bot...")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, drop_pending_updates=True)
