@@ -1,6 +1,6 @@
 """
 Feature Engineering Engine — реализация метрик из документа
-Weighted OBI (now with price-distance weighting), CVD, Leverage Velocity, MLOFI, Regime (3 states), Basis и др.
+WOBI (price-distance), CVD, θ_LV, MLOFI, 3-state Regime, Basis, Iceberg, Spoofing.
 """
 
 import numpy as np
@@ -20,7 +20,6 @@ class FeatureEngine:
     def __init__(self, symbol: str):
         self.symbol = symbol
 
-        # Rolling buffers
         self.cvd_buffer: Deque[float] = deque(maxlen=2000)
         self.trade_volume_buffer: Deque[float] = deque(maxlen=2000)
         self.oi_buffer: Deque[float] = deque(maxlen=500)
@@ -28,14 +27,14 @@ class FeatureEngine:
 
         self.last_cvd: float = 0.0
         self.last_mid: float = 0.0
+        self.last_oi: float = 0.0
+        self.last_funding_rate: float = 0.0
 
-        # For spoof detection
         self.cancelled_volume: Dict[float, float] = {}
         self.filled_volume: Dict[float, float] = {}
 
-        # Модули из документа
         self.mlofi_calc = MultiLevelOFICalculator(levels=10, window_updates=60)
-        self.regime_detector = MarketRegimeDetector(n_states=3, window=300)  # 3 состояния
+        self.regime_detector = MarketRegimeDetector(n_states=3, window=300)
         self.basis_calc = CrossExchangeBasis(window=120)
         self.last_binance_mid: float | None = None
         self.last_bybit_mid: float | None = None
@@ -49,11 +48,14 @@ class FeatureEngine:
         self.cvd_buffer.append(self.last_cvd)
         self.trade_volume_buffer.append(qty)
 
+    def update_derivative_data(self, open_interest: float, funding_rate: float = 0.0):
+        """ Обновляет OI и funding rate из Bybit tickers (for θ_LV и Basis) """
+        self.last_oi = open_interest
+        self.last_funding_rate = funding_rate
+        if open_interest > 0:
+            self.oi_buffer.append(open_interest)
+
     def calculate_wobi(self, bids: list, asks: list, levels: int = None) -> float:
-        """
-        Weighted Order Book Imbalance (WOBI)
-        Теперь с весами по ценовой дистанции |p - p_mid| (точно как в документе).
-        """
         if levels is None:
             levels = settings.wobi_levels
 
@@ -74,8 +76,6 @@ class FeatureEngine:
         for i in range(min(len(sorted_bids), len(sorted_asks))):
             price = (sorted_bids[i].price + sorted_asks[i].price) / 2
             distance = abs(price - mid_price)
-
-            # Вес по ценовой дистанции (как в документе)
             w = np.exp(-settings.wobi_lambda * distance)
 
             bid_vol = sorted_bids[i].qty
@@ -128,17 +128,20 @@ class FeatureEngine:
         current_oi: float = 0.0,
         spot_volume_1m: float = 0.0
     ) -> FeatureVector:
+        # Используем last_oi если current_oi не передан
+        effective_oi = current_oi if current_oi > 0 else self.last_oi
+
         wobi = self.calculate_wobi(bids, asks)
         taker_agg = self.calculate_taker_aggression()
 
         theta_lv = self.calculate_leverage_velocity(
-            delta_oi=current_oi - (self.oi_buffer[-1] if self.oi_buffer else current_oi),
+            delta_oi=effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi),
             mid_price=mid_price,
             spot_volume=spot_volume_1m
         )
 
         if self.oi_buffer:
-            self.oi_buffer.append(current_oi)
+            self.oi_buffer.append(effective_oi)
 
         spread = (min([a.price for a in asks]) - max([b.price for b in bids])) if bids and asks else 0.0
 
