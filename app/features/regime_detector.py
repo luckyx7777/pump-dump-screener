@@ -1,13 +1,11 @@
 """
 Market Regime Detection с помощью Hidden Markov Model (HMM).
-Полная реализация идеи из документа (3 состояния: LV / TR / HV + динамические веса).
+Исправленная версия: стабильная transition matrix без ошибок 'rows must sum to 1'.
 """
 
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
 from collections import deque
-from typing import Literal
-
 import structlog
 
 logger = structlog.get_logger()
@@ -17,22 +15,31 @@ class MarketRegimeDetector:
     def __init__(self, n_states: int = 3, window: int = 300):
         self.n_states = n_states
         self.window = window
+
+        # Важно: init_params='' чтобы не перезаписывать нашу transition matrix
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
             n_iter=150,
             random_state=42,
-            init_params="kmeans"  # better init
+            init_params="",          # не трогаем startprob / transmat / means
+            params="mcd"           # обновляем means, covars, но не transmat
         )
-        # Explicit transition matrix and start probabilities (aligned with methodology spirit)
-        # States: 0=LOW_VOL, 1=TRENDING, 2=HIGH_VOL
+
+        # Фиксированная transition matrix (3 состояния)
         if n_states == 3:
-            self.hmm.startprob_ = np.array([0.5, 0.3, 0.2])
-            self.hmm.transmat_ = np.array([
-                [0.70, 0.25, 0.05],  # LOW_VOL  -> stay calm or move to trend
-                [0.15, 0.65, 0.20],  # TRENDING -> can go high vol
-                [0.10, 0.30, 0.60],  # HIGH_VOL -> eventually calm down
+            self._startprob = np.array([0.5, 0.3, 0.2])
+            self._transmat = np.array([
+                [0.70, 0.25, 0.05],
+                [0.15, 0.65, 0.20],
+                [0.10, 0.30, 0.60],
             ])
+            # Нормализуем на всякий случай
+            self._transmat = self._transmat / self._transmat.sum(axis=1, keepdims=True)
+
+            self.hmm.startprob_ = self._startprob.copy()
+            self.hmm.transmat_ = self._transmat.copy()
+
         self.is_fitted = False
         self.feature_buffer: deque[float] = deque(maxlen=window)
         self.current_regime: int = 0
@@ -43,9 +50,6 @@ class MarketRegimeDetector:
         }
 
     def update(self, feature_value: float) -> int:
-        """
-        Обновляет модель и возвращает текущий режим.
-        """
         self.feature_buffer.append(feature_value)
 
         if len(self.feature_buffer) < 50:
@@ -58,11 +62,16 @@ class MarketRegimeDetector:
                 self.hmm.fit(X)
                 self.is_fitted = True
             else:
-                # Incremental refit on recent data
                 self.hmm.fit(X[-min(150, len(X)): ])
+
+            # После каждого fit() восстанавливаем нашу transition matrix
+            if self.n_states == 3:
+                self.hmm.startprob_ = self._startprob.copy()
+                self.hmm.transmat_ = self._transmat.copy()
 
             hidden_states = self.hmm.predict(X)
             self.current_regime = int(hidden_states[-1])
+
         except Exception as e:
             logger.warning("HMM update failed", error=str(e))
 
@@ -72,28 +81,10 @@ class MarketRegimeDetector:
         return self.regime_names.get(self.current_regime, "UNKNOWN")
 
     def get_regime_weights(self) -> dict:
-        """
-        Динамические веса для скоринга в зависимости от режима (W_k(R_t) из документа).
-        """
         regime = self.current_regime
-        if regime == 0:  # LOW_VOL - фокус на OBI / MLOFI
-            return {
-                "wobi": 0.45,
-                "taker_aggression": 0.25,
-                "cvd": 0.15,
-                "leverage_velocity": 0.15
-            }
-        elif regime == 1:  # TRENDING - фокус на CVD и плечо
-            return {
-                "wobi": 0.30,
-                "taker_aggression": 0.25,
-                "cvd": 0.25,
-                "leverage_velocity": 0.20
-            }
-        else:  # HIGH_VOL - фильтры ликвидности и плеча
-            return {
-                "wobi": 0.20,
-                "taker_aggression": 0.30,
-                "cvd": 0.25,
-                "leverage_velocity": 0.25
-            }
+        if regime == 0:
+            return {"wobi": 0.45, "taker_aggression": 0.25, "cvd": 0.15, "leverage_velocity": 0.15}
+        elif regime == 1:
+            return {"wobi": 0.30, "taker_aggression": 0.25, "cvd": 0.25, "leverage_velocity": 0.20}
+        else:
+            return {"wobi": 0.20, "taker_aggression": 0.30, "cvd": 0.25, "leverage_velocity": 0.25}
