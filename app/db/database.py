@@ -6,12 +6,24 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 import structlog
+import re
 
 logger = structlog.get_logger()
 
+
+def _get_async_database_url(url: str) -> str:
+    """Принудительно добавляем +asyncpg, если его нет."""
+    if url.startswith("postgresql://") and "+asyncpg" not in url:
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
+# Нормализуем URL перед созданием engine
+async_database_url = _get_async_database_url(settings.database_url)
+
 # Async engine
 engine = create_async_engine(
-    settings.database_url,
+    async_database_url,
     echo=False,
     pool_pre_ping=True,
     pool_size=10,
@@ -36,7 +48,7 @@ async def get_db():
 
 
 async def init_db():
-    """Создаём таблицы при старте (для разработки)"""
+    """Создаём таблицы при старте"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables initialized")
