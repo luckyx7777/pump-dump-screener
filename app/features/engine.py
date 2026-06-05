@@ -1,11 +1,10 @@
 """
-Feature Engineering Engine — реализация метрик из документа
-WOBI (price-distance), CVD, θ_LV, MLOFI, 3-state Regime, Basis, Iceberg, Spoofing.
+Feature Engineering Engine — финальная версия с рабочим Leverage Velocity.
 """
 
 import numpy as np
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Deque, Optional
 from app.models import FeatureVector
 from app.config import settings
@@ -49,7 +48,7 @@ class FeatureEngine:
         self.trade_volume_buffer.append(qty)
 
     def update_derivative_data(self, open_interest: float, funding_rate: float = 0.0):
-        """ Обновляет OI и funding rate из Bybit tickers (for θ_LV и Basis) """
+        """Обновляет OI и funding rate (вызывается из Bybit ticker handler)"""
         self.last_oi = open_interest
         self.last_funding_rate = funding_rate
         if open_interest > 0:
@@ -58,18 +57,15 @@ class FeatureEngine:
     def calculate_wobi(self, bids: list, asks: list, levels: int = None) -> float:
         if levels is None:
             levels = settings.wobi_levels
-
         if not bids or not asks:
             return 0.0
 
         sorted_bids = sorted(bids, key=lambda x: -x.price)[:levels]
         sorted_asks = sorted(asks, key=lambda x: x.price)[:levels]
-
         if not sorted_bids or not sorted_asks:
             return 0.0
 
         mid_price = (sorted_bids[0].price + sorted_asks[0].price) / 2
-
         wobi_num = 0.0
         wobi_den = 0.0
 
@@ -80,45 +76,26 @@ class FeatureEngine:
 
             bid_vol = sorted_bids[i].qty
             ask_vol = sorted_asks[i].qty
-
             wobi_num += w * (bid_vol - ask_vol)
             wobi_den += w * (bid_vol + ask_vol)
 
-        if wobi_den == 0:
-            return 0.0
+        return wobi_num / wobi_den if wobi_den > 0 else 0.0
 
-        return wobi_num / wobi_den
-
-    def calculate_taker_aggression(self, window_seconds: int = None) -> float:
-        if window_seconds is None:
-            window_seconds = settings.cvd_window_seconds
-
+    def calculate_taker_aggression(self) -> float:
         if len(self.cvd_buffer) < 2 or len(self.trade_volume_buffer) < 2:
             return 0.0
-
         n = min(len(self.cvd_buffer), 300)
         recent_cvd = list(self.cvd_buffer)[-n:]
         recent_vol = list(self.trade_volume_buffer)[-n:]
-
         cvd_delta = recent_cvd[-1] - recent_cvd[0]
         total_vol = sum(recent_vol) or 1.0
-
         return cvd_delta / total_vol
 
     def calculate_leverage_velocity(self, delta_oi: float, mid_price: float, spot_volume: float) -> float:
-        if spot_volume <= 0:
+        """ θ_LV = (ΔOI × P_mid) / Volume_spot """
+        if spot_volume <= 0 or mid_price <= 0:
             return 0.0
         return (delta_oi * mid_price) / spot_volume
-
-    def estimate_iceberg(self, traded_qty_at_level: float, visible_delta: float) -> float:
-        if visible_delta >= 0:
-            return 0.0
-        return max(0.0, traded_qty_at_level - abs(visible_delta))
-
-    def calculate_spoof_score(self, cancelled_qty: float, filled_qty: float) -> float:
-        if filled_qty < 1e-8:
-            return 999.0
-        return cancelled_qty / filled_qty
 
     def get_current_features(
         self,
@@ -128,19 +105,23 @@ class FeatureEngine:
         current_oi: float = 0.0,
         spot_volume_1m: float = 0.0
     ) -> FeatureVector:
-        # Используем last_oi если current_oi не передан
+        # === Автоматический расчёт spot_volume_1m из буфера сделок (если не передали) ===
+        if spot_volume_1m <= 0 and len(self.trade_volume_buffer) > 10:
+            spot_volume_1m = sum(list(self.trade_volume_buffer)[-60:])  # ~1 минута
+
         effective_oi = current_oi if current_oi > 0 else self.last_oi
 
         wobi = self.calculate_wobi(bids, asks)
         taker_agg = self.calculate_taker_aggression()
 
+        # Leverage Velocity теперь должен работать
         theta_lv = self.calculate_leverage_velocity(
-            delta_oi=effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi),
-            mid_price=mid_price,
-            spot_volume=spot_volume_1m
+            delta_oi = effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi),
+            mid_price = mid_price,
+            spot_volume = spot_volume_1m
         )
 
-        if self.oi_buffer:
+        if self.oi_buffer and effective_oi > 0:
             self.oi_buffer.append(effective_oi)
 
         spread = (min([a.price for a in asks]) - max([b.price for b in bids])) if bids and asks else 0.0
@@ -151,7 +132,6 @@ class FeatureEngine:
         regime = self.regime_detector.update(regime_feature)
 
         basis = self.basis_calc.get_basis()
-
         iceberg = self.iceberg_estimator.get_last_estimate()
         spoof_score = self.spoofing_detector.get_spoof_score()
 
@@ -177,8 +157,7 @@ class FeatureEngine:
         self.last_bybit_mid = bybit_mid
         self.basis_calc.update(binance_mid, bybit_mid)
 
-    def update_iceberg(self, price: float, traded_qty: float,
-                       visible_before: float, visible_after: float, timestamp: float):
+    def update_iceberg(self, price: float, traded_qty: float, visible_before: float, visible_after: float, timestamp: float):
         self.iceberg_estimator.update_trade(price, traded_qty, timestamp)
         return self.iceberg_estimator.estimate_iceberg(price, visible_before, visible_after, timestamp)
 
