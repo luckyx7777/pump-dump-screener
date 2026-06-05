@@ -1,11 +1,12 @@
 """
-Market Regime Detection с помощью HMM.
-Максимально стабильная версия (без ошибок transmat rows must sum to 1).
+Market Regime Detection с помощью Hidden Markov Model (HMM).
+Улучшенная стабильность + подробное логирование ошибок + защита от плохих данных.
 """
 
 import numpy as np
 from hmmlearn.hmm import GaussianHMM
 from collections import deque
+import traceback
 import structlog
 
 logger = structlog.get_logger()
@@ -19,14 +20,13 @@ class MarketRegimeDetector:
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
-            n_iter=100,
+            n_iter=120,
             random_state=42,
             init_params="",
             params="mcd"
         )
 
         if n_states == 3:
-            # Жёстко задаём переходы
             raw_transmat = np.array([
                 [0.70, 0.25, 0.05],
                 [0.15, 0.65, 0.20],
@@ -43,7 +43,11 @@ class MarketRegimeDetector:
         self.is_fitted = False
         self.feature_buffer: deque[float] = deque(maxlen=window)
         self.current_regime: int = 0
-        self.regime_names = {0: "LOW_VOL", 1: "TRENDING", 2: "HIGH_VOL"}
+        self.regime_names = {
+            0: "LOW_VOL",
+            1: "TRENDING",
+            2: "HIGH_VOL"
+        }
 
     def update(self, feature_value: float) -> int:
         if not np.isfinite(feature_value):
@@ -63,16 +67,27 @@ class MarketRegimeDetector:
             else:
                 self.hmm.fit(X[-min(120, len(X)): ])
 
-            # Всегда восстанавливаем нашу матрицу после fit
+            # Восстанавливаем нашу матрицу после каждого fit
             if self.n_states == 3:
                 self.hmm.startprob_ = self._startprob.copy()
+                self.hmm.transmat_ = self._transmat.copy()
+
+            # Дополнительная проверка валидности
+            row_sums = self.hmm.transmat_.sum(axis=1)
+            if not np.allclose(row_sums, 1.0, atol=1e-6):
+                logger.warning("HMM transmat invalid, forcing reset", row_sums=row_sums)
                 self.hmm.transmat_ = self._transmat.copy()
 
             hidden_states = self.hmm.predict(X)
             self.current_regime = int(hidden_states[-1])
 
         except Exception as e:
-            logger.warning("HMM update failed", error=str(e))
+            logger.warning(
+                "HMM update failed",
+                error=repr(e),
+                traceback=traceback.format_exc()[:500],  # первые 500 символов трейсбека
+                buffer_len=len(self.feature_buffer)
+            )
 
         return self.current_regime
 
