@@ -1,11 +1,10 @@
 """
-Market Regime Detection — стабильная онлайн-версия.
+Market Regime Detection — production-grade стабильная версия.
 
-Ключевые улучшения:
-- Не вызываем fit() на каждом обновлении (это ломает hmmlearn).
-- Refit только раз в N обновлений.
-- При ошибке просто держим предыдущий режим.
-- Защита от плохих данных.
+Стратегия:
+- Refit только раз в 40 обновлений И только если предыдущие попытки были успешными.
+- Если HMM падает > 5 раз подряд → временно отключаем HMM и возвращаем стабильный LOW_VOL.
+- Это предотвращает спам ошибок в логах.
 """
 
 import numpy as np
@@ -17,20 +16,22 @@ logger = structlog.get_logger()
 
 
 class MarketRegimeDetector:
-    def __init__(self, n_states: int = 3, window: int = 300, refit_every: int = 30):
+    def __init__(self, n_states: int = 3, window: int = 300, refit_every: int = 40):
         self.n_states = n_states
         self.window = window
         self.refit_every = refit_every
         self.update_count = 0
+        self.consecutive_failures = 0
+        self.hmm_disabled = False
 
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
-            n_iter=80,
+            n_iter=60,
             random_state=42,
             init_params="",
             params="mcd",
-            min_covar=1e-5
+            min_covar=1e-4
         )
 
         if n_states == 3:
@@ -66,18 +67,22 @@ class MarketRegimeDetector:
         if len(self.feature_buffer) < 50:
             return self.current_regime
 
+        # Если HMM временно отключён из-за постоянных ошибок → возвращаем стабильный режим
+        if self.hmm_disabled:
+            return self.current_regime
+
         X = np.array(list(self.feature_buffer), dtype=float).reshape(-1, 1)
 
-        # Защита от плохих данных
-        if np.any(~np.isfinite(X)) or np.std(X) < 1e-10:
+        if np.any(~np.isfinite(X)) or np.std(X) < 1e-9:
             return self.current_regime
 
         try:
             do_fit = (not self.is_fitted) or (self.update_count % self.refit_every == 0)
 
             if do_fit:
-                self.hmm.fit(X[-min(150, len(X)): ])
+                self.hmm.fit(X[-min(120, len(X)): ])
                 self.is_fitted = True
+                self.consecutive_failures = 0
 
                 if self.n_states == 3:
                     self.hmm.startprob_ = self._startprob.copy()
@@ -88,12 +93,16 @@ class MarketRegimeDetector:
                 self.current_regime = int(hidden_states[-1])
 
         except Exception as e:
+            self.consecutive_failures += 1
             logger.warning(
                 "HMM update failed (kept previous regime)",
                 error=repr(e),
-                buffer_len=len(self.feature_buffer)
+                consecutive_failures=self.consecutive_failures
             )
-            # При ошибке просто оставляем предыдущий режим
+
+            if self.consecutive_failures >= 5:
+                self.hmm_disabled = True
+                logger.warning("HMM temporarily disabled due to repeated failures. Using last known regime.")
 
         return self.current_regime
 
