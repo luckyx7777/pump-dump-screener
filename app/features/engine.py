@@ -1,5 +1,6 @@
 """
-Feature Engineering Engine — финальная версия с рабочим Leverage Velocity.
+Feature Engineering Engine — улучшенный расчёт Leverage Velocity.
+Более надёжный и чувствительный вариант.
 """
 
 import numpy as np
@@ -27,6 +28,7 @@ class FeatureEngine:
         self.last_mid: float = 0.0
         self.last_oi: float = 0.0
         self.last_funding_rate: float = 0.0
+        self.last_leverage_velocity: float = 0.0   # для сглаживания
 
         self.cancelled_volume: Dict[float, float] = {}
         self.filled_volume: Dict[float, float] = {}
@@ -44,7 +46,7 @@ class FeatureEngine:
         delta = qty if is_buy else -qty
         self.last_cvd += delta
         self.cvd_buffer.append(self.last_cvd)
-        self.trade_volume_buffer.append(qty)   # <-- важно для Leverage Velocity
+        self.trade_volume_buffer.append(qty)
 
     def update_derivative_data(self, open_interest: float, funding_rate: float = 0.0):
         self.last_oi = open_interest
@@ -90,9 +92,25 @@ class FeatureEngine:
         return cvd_delta / total_vol
 
     def calculate_leverage_velocity(self, delta_oi: float, mid_price: float, spot_volume: float) -> float:
-        if spot_volume <= 0 or mid_price <= 0:
-            return 0.0
-        return (delta_oi * mid_price) / spot_volume
+        """
+        θ_LV = (ΔOI × P_mid) / Volume_spot
+        Улучшенная версия с защитой от нуля.
+        """
+        if mid_price <= 0:
+            return self.last_leverage_velocity
+
+        # Если объём очень маленький — используем предыдущее значение (сглаживание)
+        if spot_volume < 50:   # меньше ~50 USDT за период
+            return self.last_leverage_velocity * 0.7   # постепенно затухает
+
+        theta = (delta_oi * mid_price) / spot_volume
+
+        # Ограничиваем экстремальные значения
+        theta = np.clip(theta, -5.0, 5.0)
+
+        # Сглаживание (EMA-подобное)
+        self.last_leverage_velocity = 0.6 * self.last_leverage_velocity + 0.4 * theta
+        return self.last_leverage_velocity
 
     def get_current_features(
         self,
@@ -102,11 +120,12 @@ class FeatureEngine:
         current_oi: float = 0.0,
         spot_volume_1m: float = 0.0
     ) -> FeatureVector:
-        # === Надёжный расчёт spot volume из буфера сделок ===
+        # === Расчёт объёма из буфера сделок ===
         effective_volume = spot_volume_1m
-        if effective_volume <= 0 and len(self.trade_volume_buffer) >= 20:
-            # Берём последние 60-120 обновлений (~1-2 минуты)
-            window = min(120, len(self.trade_volume_buffer))
+
+        if effective_volume <= 0 and len(self.trade_volume_buffer) >= 15:
+            # Берём более длинное окно (1.5–3 минуты)
+            window = min(180, len(self.trade_volume_buffer))
             effective_volume = sum(list(self.trade_volume_buffer)[-window:])
 
         effective_oi = current_oi if current_oi > 0 else self.last_oi
@@ -115,7 +134,7 @@ class FeatureEngine:
         taker_agg = self.calculate_taker_aggression()
 
         # Leverage Velocity
-        delta_oi = effective_oi - (self.oi_buffer[-1] if self.oi_buffer else effective_oi)
+        delta_oi = effective_oi - (self.oi_buffer[-1] if len(self.oi_buffer) > 5 else effective_oi)
         theta_lv = self.calculate_leverage_velocity(delta_oi, mid_price, effective_volume)
 
         if effective_oi > 0:
