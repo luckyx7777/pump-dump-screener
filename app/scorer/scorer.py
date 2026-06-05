@@ -1,6 +1,6 @@
 """
-Multi-factor Scoring Engine with Z-score normalization, logical gating and regime-aware weighting.
-Fully aligned with the pump-dump methodology document.
+Multi-factor Scoring Engine with stricter multi-confirmation logic.
+Signals now require alignment of multiple factors for higher quality and fewer false positives.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from app.config import settings
 
 class DynamicScorer:
     def __init__(self):
-        self.feature_history: Dict[str, deque] = {}  # symbol -> deque of recent features
+        self.feature_history: Dict[str, deque] = {}
 
     def _get_or_create_buffer(self, symbol: str) -> deque:
         if symbol not in self.feature_history:
@@ -29,23 +29,17 @@ class DynamicScorer:
         return (current - mean) / std
 
     def _get_regime_weights(self, regime: int) -> dict:
-        """Dynamic weights based on regime (LOW_VOL=0, TRENDING=1, HIGH_VOL=2)"""
-        if regime == 0:  # LOW_VOL
+        if regime == 0:
             return {"wobi": 0.45, "taker": 0.25, "cvd": 0.15, "lev": 0.15}
-        elif regime == 1:  # TRENDING
+        elif regime == 1:
             return {"wobi": 0.30, "taker": 0.25, "cvd": 0.25, "lev": 0.20}
-        else:  # HIGH_VOL - more conservative on wobi, higher on filters
+        else:
             return {"wobi": 0.20, "taker": 0.30, "cvd": 0.25, "lev": 0.25}
 
     def score(self, features: FeatureVector) -> Signal:
-        """
-        Итоговый скоринг S(t) ∈ [-1, 1]
-        + динамические веса по режиму + гейты из документа
-        """
         buf = self._get_or_create_buffer(features.symbol)
         buf.append(features)
 
-        # Z-score на основе истории
         wobi_history = [f.wobi for f in buf]
         cvd_history = [f.cvd for f in buf]
         taker_history = [f.taker_aggression for f in buf]
@@ -56,8 +50,8 @@ class DynamicScorer:
         z_taker = self._calculate_zscore(taker_history, features.taker_aggression)
         z_lev = self._calculate_zscore(lev_history, features.leverage_velocity)
 
-        # === ДИНАМИЧЕСКИЕ ВЕСА ПО РЕЖИМУ (Priority 2) ===
         regime_weights = self._get_regime_weights(features.regime)
+
         raw_score = (
             regime_weights["wobi"] * z_wobi +
             regime_weights["taker"] * z_taker +
@@ -65,39 +59,38 @@ class DynamicScorer:
             regime_weights["lev"] * z_lev
         )
 
-        # Нелинейная активация
         score = np.tanh(raw_score * 1.5)
 
-        # === ЛОГИЧЕСКИЕ ГЕЙТЫ (enhanced) ===
         triggered = []
         blocked = False
 
-        # 1. Дивергенция CVD и OBI
         if z_wobi > 1.5 and z_cvd < -0.8:
             blocked = True
             triggered.append("CVD_OBI_DIVERGENCE")
 
-        # 2. Спуфинг
         if features.spoof_score > settings.spoof_threshold:
             blocked = True
             triggered.append("SPOOFING_DETECTED")
 
-        # 3. Перегрев плеча без спотового подтверждения
         if features.leverage_velocity > 2.5 and abs(features.taker_aggression) < 0.3:
             blocked = True
             triggered.append("LEVERAGE_WITHOUT_SPOT_SUPPORT")
 
-        # 4. HIGH_VOL regime gate (new from Priority 2) - блокируем агрессивные сигналы в хаосе
         if features.regime_name == "HIGH_VOL" and features.leverage_velocity > 1.8:
             blocked = True
             triggered.append("HIGH_VOL_REGIME")
 
         direction = "NEUTRAL"
+
         if not blocked:
-            if score > settings.pump_threshold:
+            # СТРОГИЙ ТРИГГЕР: требуем подтверждения минимум от одного сильного фактора в правильном направлении
+            strong_positive = (z_wobi > 0.9) or (z_taker > 0.9) or (z_cvd > 0.8)
+            strong_negative = (z_wobi < -0.9) or (z_taker < -0.9) or (z_cvd < -0.8)
+
+            if score > settings.pump_threshold and strong_positive:
                 direction = "LONG"
                 triggered.append("PRE_PUMP")
-            elif score < settings.dump_threshold:
+            elif score < settings.dump_threshold and strong_negative:
                 direction = "SHORT"
                 triggered.append("PRE_DUMP")
 
@@ -116,20 +109,34 @@ class DynamicScorer:
 
     def _generate_explanation(self, f: FeatureVector, z_wobi, z_taker, z_cvd, z_lev, triggered, regime_name: str) -> str:
         parts = []
-        if z_wobi > 1.2:
-            parts.append(f"Сильный дисбаланс в стакане (WOBI z={z_wobi:.2f})")
-        if z_taker > 1.0:
-            parts.append(f"Доминирование агрессивных покупок (Taker z={z_taker:.2f})")
-        if z_lev > 1.5:
-            parts.append(f"Быстрый набор плеча (θ_LV z={z_lev:.2f})")
+
+        if abs(z_wobi) > 0.8:
+            direction = "покупателей" if z_wobi > 0 else "продавцов"
+            parts.append(f"Сильный дисбаланс в стакане в пользу {direction} (WOBI z={z_wobi:.2f})")
+
+        if abs(z_taker) > 0.8:
+            direction = "агрессивных покупок" if z_taker > 0 else "агрессивных продаж"
+            parts.append(f"Доминирование {direction} (Taker z={z_taker:.2f})")
+
+        if abs(z_cvd) > 0.7:
+            direction = "накопления" if z_cvd > 0 else "распределения"
+            parts.append(f"Значительный CVD ({direction}, z={z_cvd:.2f})")
+
+        if z_lev > 1.2:
+            parts.append(f"Активный набор плеча (θ_LV z={z_lev:.2f})")
 
         if regime_name == "HIGH_VOL":
-            parts.append("⚠️ HIGH_VOL режим - сигналы фильтруются")
-        if "CVD_OBI_DIVERGENCE" in triggered:
-            parts.append("⚠️ Дивергенция - возможен ложный пробой")
-        if "SPOOFING_DETECTED" in triggered:
-            parts.append("🚫 Обнаружен спуфинг - сигнал заблокирован")
-        if "HIGH_VOL_REGIME" in triggered:
-            parts.append("🚨 HIGH_VOL режим + высокое плечо - сигнал блокирован")
+            parts.append("⚠️ HIGH_VOL режим — сигналы фильтруются")
 
-        return " | ".join(parts) if parts else "Нейтральная микроструктура"
+        for t in triggered:
+            if t == "CVD_OBI_DIVERGENCE":
+                parts.append("⚠️ Дивергенция CVD/OBI — возможен ложный сигнал")
+            elif t == "SPOOFING_DETECTED":
+                parts.append("🚫 Обнаружен спуфинг")
+            elif t == "HIGH_VOL_REGIME":
+                parts.append("🚨 Блокировка в HIGH_VOL режиме")
+
+        if not parts:
+            return "Нейтральная микроструктура (недостаточно подтверждений для сигнала)"
+
+        return " | ".join(parts)
