@@ -1,12 +1,17 @@
 """
 Professional Order Book reconstruction for Binance and Bybit.
-Handles incremental updates with sequence validation (critical for L2 data).
+Handles incremental updates with sequence validation (critical for L2 data per methodology).
 """
 
 from collections import deque
 from typing import Dict, List, Tuple, Optional
+from datetime import datetime
 import time
+import structlog
+
 from app.models import OrderBookLevel, OrderBookSnapshot
+
+logger = structlog.get_logger()
 
 
 class OrderBook:
@@ -23,19 +28,22 @@ class OrderBook:
         self.last_update_id: Optional[int] = None
         self.last_timestamp: float = 0.0
         self.is_initialized: bool = False
+        self.needs_resync: bool = False
 
     def apply_snapshot(self, bids: List[Tuple[float, float]], asks: List[Tuple[float, float]], update_id: int):
-        """Apply initial snapshot from REST."""
+        """Apply initial snapshot from REST or WS snapshot."""
         self.bids = {price: qty for price, qty in bids[:self.max_depth]}
         self.asks = {price: qty for price, qty in asks[:self.max_depth]}
         self.last_update_id = update_id
         self.is_initialized = True
         self.last_timestamp = time.time()
+        self.needs_resync = False
+        logger.info("OrderBook snapshot applied", symbol=self.symbol, update_id=update_id)
 
     def update_binance(self, data: dict) -> bool:
         """
-        Process Binance diff depth stream.
-        Returns True if update was applied successfully.
+        Process Binance diff depth stream with strict sequence validation.
+        Returns True if update applied, False if gap detected (caller should resync).
         """
         if not self.is_initialized:
             return False
@@ -43,13 +51,22 @@ class OrderBook:
         first_update_id = data.get("U")
         last_update_id = data.get("u")
 
-        # Sequence validation (critical!)
+        if first_update_id is None or last_update_id is None:
+            return True  # some messages may not have it
+
+        # Strict sequence validation per methodology
         if self.last_update_id is not None:
             if first_update_id > self.last_update_id + 1:
-                # Gap detected → need new snapshot
+                logger.warning(
+                    "Binance sequence gap detected",
+                    symbol=self.symbol,
+                    expected=self.last_update_id + 1,
+                    got=first_update_id
+                )
+                self.needs_resync = True
                 return False
             if last_update_id <= self.last_update_id:
-                return True  # duplicate or old
+                return True  # duplicate or old update, safe to ignore
 
         # Apply bid updates
         for price_str, qty_str in data.get("b", []):
@@ -72,11 +89,23 @@ class OrderBook:
         return True
 
     def update_bybit(self, data: dict) -> bool:
-        """Process Bybit orderbook delta."""
+        """
+        Process Bybit orderbook delta.
+        Bybit V5 is generally reliable; we add basic sequence check if 'u' or 'seq' present.
+        """
         if not self.is_initialized:
             return False
 
-        # Bybit sends full delta or snapshot in one message
+        # Try to get sequence id if available in Bybit message
+        update_id = data.get("u") or data.get("seq") or data.get("ts")
+        if update_id is not None and self.last_update_id is not None:
+            try:
+                if int(update_id) <= self.last_update_id:
+                    return True  # old/duplicate
+            except (ValueError, TypeError):
+                pass
+
+        # Apply updates (Bybit sends full levels in delta for top 500)
         for side, levels in [("b", data.get("b", [])), ("a", data.get("a", []))]:
             book = self.bids if side == "b" else self.asks
             for level in levels:
@@ -87,6 +116,11 @@ class OrderBook:
                 else:
                     book[price] = qty
 
+        if update_id is not None:
+            try:
+                self.last_update_id = int(update_id)
+            except:
+                pass
         self.last_timestamp = time.time()
         return True
 
@@ -127,3 +161,4 @@ class OrderBook:
         self.asks.clear()
         self.is_initialized = False
         self.last_update_id = None
+        self.needs_resync = False
