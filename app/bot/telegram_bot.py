@@ -3,7 +3,7 @@ Telegram Bot для скринера пампов/дампов.
 Реальная отправка алертов + команды.
 """
 from app.config import settings
-
+from app.models import Signal, FeatureVector
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
