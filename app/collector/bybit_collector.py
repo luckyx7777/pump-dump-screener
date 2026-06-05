@@ -1,10 +1,6 @@
 """
-Полноценный асинхронный WebSocket Collector для Bybit V5 (Linear / USDT Perpetual).
-Поддерживает:
-- orderbook.500.<symbol>
-- publicTrade.<symbol>
-- tickers.<symbol> (OI + fundingRate)
-- liquidation.<symbol>
+Полноценный асинхронный WebSocket Collector для Bybit V5 (Linear).
+Поддерживает orderbook, trades, tickers (OI + funding), liquidation.
 """
 
 import asyncio
@@ -60,7 +56,6 @@ class BybitCollector:
         retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
     )
     async def _run_bybit_stream(self, symbol: str):
-        """Единый WebSocket для нескольких топиков (Bybit V5)"""
         ob = self.orderbooks[symbol]
         engine = self.engines[symbol]
 
@@ -68,7 +63,6 @@ class BybitCollector:
         logger.info("Connecting to Bybit V5", symbol=symbol)
 
         async with self.session.ws_connect(url, heartbeat=20) as ws:
-            # Подписываемся на нужные топики
             subscribe_msg = {
                 "op": "subscribe",
                 "args": [
@@ -86,23 +80,22 @@ class BybitCollector:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
 
-                    if data.get("topic", "").startswith("orderbook"):
+                    topic = data.get("topic", "")
+                    if topic.startswith("orderbook"):
                         await self._handle_bybit_orderbook(data, ob, engine, symbol)
-                    elif data.get("topic", "").startswith("publicTrade"):
+                    elif topic.startswith("publicTrade"):
                         await self._handle_bybit_trade(data, engine)
-                    elif data.get("topic", "").startswith("tickers"):
-                        await self._handle_bybit_ticker(data, engine)
-                    elif data.get("topic", "").startswith("liquidation"):
-                        logger.warning("Bybit liquidation", symbol=symbol, data=data.get("data", [{}])[0])
+                    elif topic.startswith("tickers"):
+                        self._handle_bybit_ticker(data, engine, symbol)
+                    elif topic.startswith("liquidation"):
+                        self._handle_bybit_liquidation(data, engine, symbol)
 
     async def _handle_bybit_orderbook(self, data: dict, ob: OrderBook, engine: FeatureEngine, symbol: str):
         if data.get("type") == "snapshot":
-            # Полный snapshot
             bids = [(float(x[0]), float(x[1])) for x in data["data"]["b"]]
             asks = [(float(x[0]), float(x[1])) for x in data["data"]["a"]]
             ob.apply_snapshot(bids, asks, update_id=int(data["data"].get("u", 0)))
         else:
-            # Delta
             if ob.update_bybit(data["data"]):
                 await self._update_features(symbol, ob, engine)
 
@@ -113,11 +106,41 @@ class BybitCollector:
             is_buy = trade["S"] == "Buy"
             engine.update_cvd(price, qty, is_buy=is_buy)
 
-    async def _handle_bybit_ticker(self, data: dict, engine: FeatureEngine):
+    def _handle_bybit_ticker(self, data: dict, engine: FeatureEngine, symbol: str):
+        """ Обработка tickers: OI + fundingRate (critical for θ_LV и Basis) """
         ticker = data.get("data", {})
-        # Можно обновлять current_oi и fundingRate
-        # engine.update_derivative_metrics(...)
-        pass
+        if not ticker:
+            return
+
+        try:
+            open_interest = float(ticker.get("openInterest", 0) or 0)
+            funding_rate = float(ticker.get("fundingRate", 0) or 0)
+
+            # Обновляем в engine (OI для Leverage Velocity)
+            if hasattr(engine, "update_derivative_data"):
+                engine.update_derivative_data(open_interest, funding_rate)
+
+            # Обновляем mid для cross-exchange Basis
+            last_price = float(ticker.get("lastPrice", 0) or 0)
+            if last_price > 0 and hasattr(engine, "update_basis"):
+                # Bybit mid приблизительно = lastPrice (Perp)
+                engine.update_basis(None, last_price)  # binance_mid будет обновляться из другого места
+
+        except (ValueError, TypeError, KeyError) as e:
+            logger.warning("Bybit ticker parse error", symbol=symbol, error=str(e))
+
+    def _handle_bybit_liquidation(self, data: dict, engine: FeatureEngine, symbol: str):
+        """ Базовая обработка ликвидаций (placeholder для кластеров) """
+        liqs = data.get("data", [])
+        for liq in liqs:
+            try:
+                side = liq.get("side", "")
+                price = float(liq.get("price", 0) or 0)
+                size = float(liq.get("size", 0) or 0)
+                logger.info("Bybit liquidation", symbol=symbol, side=side, price=price, size=size)
+                # TODO: добавить в engine буфер ликвидаций для кластерного анализа и proximity
+            except Exception:
+                pass
 
     async def _update_features(self, symbol: str, ob: OrderBook, engine: FeatureEngine):
         if not ob.is_initialized:
