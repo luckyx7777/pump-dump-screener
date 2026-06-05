@@ -1,6 +1,6 @@
 """
-Market Regime Detection с помощью Hidden Markov Model (HMM).
-Улучшенная стабильность + подробное логирование ошибок + защита от плохих данных.
+Market Regime Detection — максимально стабильная версия.
+Добавлена защита от плохих данных, которые ломают hmmlearn.
 """
 
 import numpy as np
@@ -20,10 +20,11 @@ class MarketRegimeDetector:
         self.hmm = GaussianHMM(
             n_components=n_states,
             covariance_type="diag",
-            n_iter=120,
+            n_iter=100,
             random_state=42,
             init_params="",
-            params="mcd"
+            params="mcd",
+            min_covar=1e-6          # защита от вырождения
         )
 
         if n_states == 3:
@@ -58,7 +59,11 @@ class MarketRegimeDetector:
         if len(self.feature_buffer) < 50:
             return self.current_regime
 
-        X = np.array(list(self.feature_buffer)).reshape(-1, 1)
+        X = np.array(list(self.feature_buffer), dtype=float).reshape(-1, 1)
+
+        # Защита от плохих данных
+        if np.any(~np.isfinite(X)) or np.std(X) < 1e-12:
+            return self.current_regime
 
         try:
             if not self.is_fitted:
@@ -67,15 +72,8 @@ class MarketRegimeDetector:
             else:
                 self.hmm.fit(X[-min(120, len(X)): ])
 
-            # Восстанавливаем нашу матрицу после каждого fit
             if self.n_states == 3:
                 self.hmm.startprob_ = self._startprob.copy()
-                self.hmm.transmat_ = self._transmat.copy()
-
-            # Дополнительная проверка валидности
-            row_sums = self.hmm.transmat_.sum(axis=1)
-            if not np.allclose(row_sums, 1.0, atol=1e-6):
-                logger.warning("HMM transmat invalid, forcing reset", row_sums=row_sums)
                 self.hmm.transmat_ = self._transmat.copy()
 
             hidden_states = self.hmm.predict(X)
@@ -85,8 +83,10 @@ class MarketRegimeDetector:
             logger.warning(
                 "HMM update failed",
                 error=repr(e),
-                traceback=traceback.format_exc()[:500],  # первые 500 символов трейсбека
-                buffer_len=len(self.feature_buffer)
+                buffer_len=len(self.feature_buffer),
+                x_min=float(np.min(X)),
+                x_max=float(np.max(X)),
+                x_std=float(np.std(X))
             )
 
         return self.current_regime
